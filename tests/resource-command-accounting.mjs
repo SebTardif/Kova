@@ -1,6 +1,121 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import test from "node:test";
-import { runCommand, quoteShell } from "../src/commands.mjs";
+import { linuxCommandOwnerInvocation } from "../src/collectors/linux-command-owner.mjs";
+import { runCommand, quoteShell, runWithCommandEnv } from "../src/commands.mjs";
+
+test("unsupported Linux architectures retain the direct accounting helper", () => {
+  const architecture = Object.getOwnPropertyDescriptor(process, "arch");
+  Object.defineProperty(process, "arch", { ...architecture, value: "s390x" });
+  try {
+    assert.deepEqual(linuxCommandOwnerInvocation("/node", ["helper", "command"], "/unused", {}), {
+      file: "/node",
+      args: ["helper", "command"]
+    });
+  } finally {
+    Object.defineProperty(process, "arch", architecture);
+  }
+});
+
+test("the native owner follows the scoped KOVA_HOME", { skip: process.platform !== "linux" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "kova-command-owner-home-"));
+  try {
+    const result = await runWithCommandEnv({ KOVA_HOME: root }, () =>
+      runCommand("true", { resourceSample: {}, timeoutMs: 10000 }));
+    assert.equal(result.status, 0, result.stderr);
+    const entries = await readdir(join(root, "libexec"));
+    assert.equal(entries.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a noexec KOVA_HOME retains the direct accounting helper", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp("/dev/shm/kova-command-owner-noexec-").catch(() => null);
+  if (!root) {
+    t.skip("no writable /dev/shm mount");
+    return;
+  }
+  try {
+    const executable = join(root, "probe");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o700);
+    if (spawnSync(executable).error?.code !== "EACCES") {
+      t.skip("/dev/shm is executable");
+      return;
+    }
+    assert.deepEqual(linuxCommandOwnerInvocation("/node", ["helper"], root, {}), {
+      file: "/node",
+      args: ["helper"]
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the native owner probe excludes ambient Node preloads", { skip: process.platform !== "linux" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "kova-command-owner-node-options-"));
+  const marker = join(root, "preload-ran");
+  const preload = join(root, "preload.cjs");
+  const previous = process.env.NODE_OPTIONS;
+  try {
+    await writeFile(preload, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "loaded");`);
+    process.env.NODE_OPTIONS = `--require=${preload}`;
+    const result = await runWithCommandEnv({ KOVA_HOME: root }, () =>
+      runCommand("true", { resourceSample: {}, timeoutMs: 10000 }));
+    assert.equal(result.status, 0, result.stderr);
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a relative scoped KOVA_HOME survives the command cwd change", { skip: process.platform !== "linux" }, async () => {
+  const originalCwd = process.cwd();
+  const outside = await mkdtemp(join(tmpdir(), "kova-command-owner-cwd-"));
+  const home = await mkdtemp(join(tmpdir(), "kova-command-owner-relative-"));
+  try {
+    process.chdir(outside);
+    const result = await runWithCommandEnv({ KOVA_HOME: relative(outside, home) }, () =>
+      runCommand("true", { resourceSample: {}, timeoutMs: 10000 }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.resourceSamples.cpuCoverageComplete, true, JSON.stringify(result.resourceSamples.errors));
+    assert.equal((await readdir(join(home, "libexec"))).length, 1);
+  } finally {
+    process.chdir(originalCwd);
+    await rm(outside, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("an unwritable scoped KOVA_HOME retains the direct accounting helper", { skip: process.platform !== "linux" }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "kova-command-owner-unwritable-"));
+  const writeProbe = join(home, "write-probe");
+  try {
+    await chmod(home, 0o500);
+    try {
+      await mkdir(writeProbe);
+      t.skip("current user bypasses directory write permissions");
+      return;
+    } catch (error) {
+      assert.equal(error.code, "EACCES");
+    }
+    const result = await runWithCommandEnv({ KOVA_HOME: home }, () =>
+      runCommand("true", { resourceSample: {}, timeoutMs: 10000 }));
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    await chmod(home, 0o700);
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("a final sample measures a sub-second command before its wait owner exits", { skip: process.platform !== "linux" }, async () => {
   const result = await runCommand(`sleep 0.2; ${quoteShell(process.execPath)} -e 'const end=Date.now()+200; while(Date.now()<end){}'`, {
@@ -63,6 +178,34 @@ test("parallel child CPU is measured against the work actually performed", { ski
     referenceAverageLower, measuredPeak, productionCpuThreshold: 200,
     physicallyObservedAboveThreshold: referenceAverageLower > 200,
     terminalCoverageComplete: result.resourceSamples.cpuCoverageComplete }));
+});
+
+test("detached descendants remain owned through terminal CPU settlement", { skip: process.platform !== "linux" }, async () => {
+  const { execFileSync } = await import("node:child_process");
+  const hz = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim());
+  assert.ok(Number.isSafeInteger(hz) && hz > 0);
+  const root = await mkdtemp(join(tmpdir(), "kova-subreaper-"));
+  const parentRecord = join(root, "parent.json");
+  try {
+    const worker = `const fs=require('node:fs');const start=Date.now();while(Date.now()-start<650){};fs.writeFileSync(process.env.PARENT_RECORD,JSON.stringify({expected:Number(process.env.EXPECTED_PARENT),actual:process.ppid,elapsedMs:Date.now()-start,cpu:process.cpuUsage()}));`;
+    const launcher = `const fs=require('node:fs');const {spawn}=require('node:child_process');const proc=pid=>{const text=fs.readFileSync('/proc/'+pid+'/stat','utf8');return {parent:Number(text.slice(text.lastIndexOf(')')+2).trim().split(/\\s+/)[1]),argv:fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\\0').filter(Boolean)};};let owner=process.ppid;while(owner>1){const entry=proc(owner);if(entry.argv.some(arg=>arg.endsWith('/support/resource-command.mjs')))break;owner=entry.parent;}if(owner<=1)throw new Error('resource command owner not found');const child=spawn(process.execPath,['-e',${JSON.stringify(worker)}],{detached:true,stdio:'ignore',env:{...process.env,EXPECTED_PARENT:String(owner),PARENT_RECORD:${JSON.stringify(parentRecord)}}});child.unref();setTimeout(()=>{},300);`;
+    const result = await runCommand(`${quoteShell(process.execPath)} -e ${quoteShell(launcher)}`, {
+      resourceSample: { intervalMs: 250 },
+      timeoutMs: 10000
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.resourceSamples.cpuCoverageComplete, true, JSON.stringify(result.resourceSamples.errors));
+    const parent = JSON.parse(await readFile(parentRecord, "utf8"));
+    assert.equal(parent.actual, parent.expected, `detached worker escaped accounting owner ${parent.expected} to ${parent.actual}`);
+    const cpuMicros = parent.cpu.user + parent.cpu.system;
+    const quantizationMicros = 2 * 1_000_000 / hz;
+    const referenceAverageLower = Math.max(0, cpuMicros - quantizationMicros) / (parent.elapsedMs * 1000) * 100;
+    const measuredPeak = result.resourceSamples.byRole["command-tree"].maxCpuPercent;
+    assert.ok(referenceAverageLower > 0);
+    assert.ok(measuredPeak >= referenceAverageLower, `${measuredPeak}% does not cover ${referenceAverageLower}% of detached work`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 
