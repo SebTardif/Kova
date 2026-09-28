@@ -45,10 +45,10 @@ export function readLinuxCpuSnapshot(processes, previouslyTrackedPids = new Set(
       counters.push({ ...entry, ...values });
     } catch (error) {
       if (error.code !== "ENOENT" && error.code !== "ESRCH") throw error;
-      // Parent counters precede every live child counter. A child disappearing
-      // after the process census invalidates this scan: its parent's earlier
-      // wait counter cannot establish that child's terminal CPU transfer.
-      if (entry.roles?.length || previouslyTrackedPids.has(entry.pid)) {
+      // Work never counter-observed is covered like work completed between
+      // censuses. Losing a tracked identity remains incomplete because its
+      // parent's earlier counter cannot establish terminal CPU transfer.
+      if (previouslyTrackedPids.has(entry.pid)) {
         throw Object.assign(new LinuxCpuSnapshotChangedError("Product process exited during CPU collection"), { process: entry });
       }
     }

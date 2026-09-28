@@ -85,8 +85,8 @@ test("terminal sampling refreshes a census after a tracked child exits", {
   }
 });
 
-for (const mode of ["lost", "listing-failed", "unstable-lower-bound"]) test(
-  "terminal sampling preserves census evidence: " + mode, async () => {
+for (const mode of ["first-glimpse-exit", "listing-failed"]) test(
+  "terminal sampling retries a process that exits before its first counter read: " + mode, async () => {
   const listingFailed = mode === "listing-failed";
   const platform = Object.getOwnPropertyDescriptor(process, "platform");
   const originalRead = fs.readFileSync;
@@ -103,7 +103,7 @@ for (const mode of ["lost", "listing-failed", "unstable-lower-bound"]) test(
       now += 1000;
       census += 1;
       if (census === 2 && listingFailed) return { status: 1, stderr: "transient census failure" };
-      return { status: 0, pid: 999, stdout: census === 2 || (mode === "unstable-lower-bound" && census <= 4 && census > 1)
+      return { status: 0, pid: 999, stdout: census === 2
         ? "1 0 1024 0 node\n2 1 1024 0 gateway\n" : "1 0 1024 0 node\n" };
     }
     return originalSpawn(command, ...args);
@@ -121,17 +121,10 @@ for (const mode of ["lost", "listing-failed", "unstable-lower-bound"]) test(
   syncBuiltinESMExports();
   try {
     const summary = await startResourceSampler(1, { trackedRolePids: { gateway: 2 }, artifactPath }).stop();
-    assert.equal(summary.cpuCoverageComplete, listingFailed);
-    if (listingFailed) assert.deepEqual(summary.errors, []);
-    else {
-      assert.ok(summary.errors.some((error) => error.includes("unobserved process roles")));
-      const samples = (await fs.promises.readFile(artifactPath, "utf8")).trim().split("\n").map(JSON.parse);
-      const replay = summarizeResourceSamples(samples);
-      assert.equal(replay.cpuCoverageComplete, false, "raw evidence must retain the lost-role failure");
-      assert.ok(replay.errors.some((error) => error.includes("unobserved process roles")));
-      const lost = samples.flatMap((sample) => sample.cpuLostProcesses ?? []);
-      assert.ok(lost.some((entry) => entry.pid === 2 && entry.ppid === 1 && entry.command === "gateway" && entry.roles.includes("gateway")));
-    }
+    assert.equal(summary.cpuCoverageComplete, true, JSON.stringify(summary.errors));
+    assert.deepEqual(summary.errors, []);
+    const samples = (await fs.promises.readFile(artifactPath, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(samples.some((sample) => sample.cpuLostProcesses?.length), false);
   } finally {
     mock.restoreAll();
     Object.defineProperty(process, "platform", platform);
@@ -762,7 +755,7 @@ test("resource summaries keep recycled PID identities separate", () => {
 });
 
 
-test("a child exiting after its wait owner read invalidates the census", () => {
+test("only a previously tracked child exiting after its wait owner read invalidates the census", () => {
   const reads = [];
   const original = fs.readFileSync;
   mock.method(fs, "readFileSync", (path, ...args) => {
@@ -774,15 +767,17 @@ test("a child exiting after its wait owner read invalidates the census", () => {
   });
   syncBuiltinESMExports();
   try {
-    assert.throws(() => readLinuxCpuSnapshot([
+    assert.deepEqual(readLinuxCpuSnapshot([
       { ...processRow(2, 1, 100), roles: ["gateway"] }, processRow(1, 0, 0)
-    ]), LinuxCpuSnapshotChangedError);
+    ]).map((entry) => entry.pid), [1]);
     assert.deepEqual(reads, ["/proc/1/stat", "/proc/2/stat"]);
+    reads.length = 0;
     // A restarted Gateway may already have lost its current role, but its
     // previously measured identity still requires terminal wait accounting.
     assert.throws(() => readLinuxCpuSnapshot([
       processRow(2, 1, 100), processRow(1, 0, 0)
     ], new Set([2])), LinuxCpuSnapshotChangedError);
+    assert.deepEqual(reads, ["/proc/1/stat", "/proc/2/stat"]);
   } finally {
     mock.restoreAll();
     syncBuiltinESMExports();

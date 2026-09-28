@@ -5,6 +5,7 @@ All notable changes to Kova are documented in this file.
 ## Unreleased
 
 - Stabilize terminal Linux CPU accounting without hiding proven excess, retain wait-owner counters through settlement, and attribute the settled sample to the final channel workflow. Thanks @RomneyDa. (#144)
+- Treat Linux processes that disappear before their first counter read like other work completed between censuses, while retaining fail-closed coverage for previously tracked processes.
 
 ## 0.2.1 - 2026-09-23
 
