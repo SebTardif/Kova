@@ -12,7 +12,13 @@ import { evaluateRecord } from "../src/evaluator.mjs";
 import { createLinuxCpuAccountant, readLinuxCpuSnapshot, LinuxCpuSnapshotChangedError } from "../src/collectors/linux-cpu.mjs";
 import { loadProcessRoles } from "../src/registries/process-roles.mjs";
 
-const clock = (seconds) => ({ hz: 100, ticks: seconds * 100, monotonicMs: seconds * 1000 });
+const clock = (seconds, discoverySeconds = seconds) => ({
+  hz: 100,
+  ticks: seconds * 100,
+  monotonicMs: seconds * 1000,
+  discoveryTicks: discoverySeconds * 100,
+  discoveryMonotonicMs: discoverySeconds * 1000
+});
 const processRow = (pid, ppid, cpuTicks, childCpuTicks = 0, startTicks = 0) => ({ pid, ppid, cpuTicks, childCpuTicks, startTicks, rssMb: 0, command: "synthetic", roles: [] });
 // Point estimates independently verify tick/debt conservation; gates consume bounds.
 const cpuEstimate = (rows) => rows.reduce((total, row) => total + (row.ownCpuPercent ?? 0) + (row.reapedCpuPercent ?? 0), 0);
@@ -32,6 +38,30 @@ test("gateway discovery refreshes a census that predates gateway birth", async (
   const summary = await sampler.stop();
   assert.ok(censusCount >= 2);
   assert.equal(summary.byRole.gateway.peakRssMb, 2);
+});
+
+test("Linux discovery-clock failures remain incomplete sampler evidence", async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const originalRead = fs.readFileSync;
+  const originalSpawn = childProcess.spawnSync;
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  mock.method(childProcess, "spawnSync", (command, ...args) =>
+    command === "getconf" ? { status: 0, stdout: "100\n" } : originalSpawn(command, ...args));
+  mock.method(fs, "readFileSync", (path, ...args) => {
+    if (path === "/proc/uptime") throw new Error("Linux clock unavailable");
+    return originalRead(path, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const sampler = startResourceSampler(1);
+    const summary = await sampler.stop();
+    assert.equal(summary.cpuCoverageComplete, false);
+    assert.ok(summary.errors.includes("Linux clock unavailable"));
+  } finally {
+    mock.restoreAll();
+    Object.defineProperty(process, "platform", platform);
+    syncBuiltinESMExports();
+  }
 });
 
 test("terminal Linux CPU samples retain a quantization-safe accounting interval", {
@@ -525,6 +555,17 @@ test("late-discovered product CPU keeps interval bounds and incomplete coverage"
   assert.ok(record.violations.some((violation) => violation.metric === "resourceCpuCoverage"));
   accountant.sample([processRow(1, 0, 100), { ...gateway, cpuTicks: 260 }], clock(16));
   assert.equal(accountant.coverageComplete(), false, "later intervals cannot repair an earlier discovery gap");
+});
+
+test("a process born during the prior census retains complete CPU coverage", () => {
+  const accountant = createLinuxCpuAccountant();
+  const owner = processRow(1, 0, 100);
+  accountant.sample([owner], clock(10, 9.8));
+  accountant.sample([owner], clock(11, 10.8));
+  const child = { ...processRow(2, 1, 40, 0, 1095), roles: ["agent-process"] };
+  const measured = accountant.sample([owner, child], clock(12, 11.8));
+  assert.equal(measured.find((entry) => entry.pid === child.pid).cpuHistoryComplete, true);
+  assert.equal(accountant.coverageComplete(), true);
 });
 
 test("late discovery cannot average a 225% CPU burst into a passing lifetime value", () => {

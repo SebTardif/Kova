@@ -35,6 +35,14 @@ export function startResourceSampler(rootPid, options = {}) {
   let lastCpuSampleFinishedMs = null;
   const lostCpuProcesses = [];
 
+  function recordCollectionError(error, lowerBoundOnly = false) {
+    if (lowerBoundOnly) return;
+    samples.push({ timestamp: new Date().toISOString(), elapsedMs: Date.now() - startedAt,
+      rootPid, gatewayPid, collectionStatus: "error",
+      collectionError: error instanceof Error ? error.message : String(error), processes: [],
+      ...(lostCpuProcesses.length ? { cpuLostProcesses: [...lostCpuProcesses] } : {}) });
+  }
+
   sample();
   const timer = setInterval(sample, intervalMs);
   timer.unref?.();
@@ -49,18 +57,24 @@ export function startResourceSampler(rootPid, options = {}) {
   async function finish() {
     clearInterval(timer);
     let terminalProcessResult = null;
+    let terminalDiscoveryClock = null;
     if (lastCpuSampleFinishedMs !== null) {
       // A command can end just after the periodic census. Give the terminal
       // counters a stable window while retaining the process roles at stop time.
       // Keep only the immediate certain floor so a proven burst cannot be
       // diluted by the wait, while ambiguous tick bounds use the settled read.
       const processLister = options.processLister ?? listProcesses;
-      terminalProcessResult = processLister(options.redactValues ?? []);
-      sample(1, terminalProcessResult, true);
+      try {
+        terminalDiscoveryClock = cpuAccountant ? readLinuxCpuClock() : null;
+        terminalProcessResult = processLister(options.redactValues ?? []);
+        sample(1, terminalProcessResult, true, terminalDiscoveryClock);
+      } catch (error) {
+        recordCollectionError(error);
+      }
       const remainingMs = MIN_LINUX_CPU_INTERVAL_MS - (performance.now() - lastCpuSampleFinishedMs);
       if (remainingMs > 0) await delay(remainingMs);
     }
-    sample(1, terminalProcessResult?.ok ? terminalProcessResult : null);
+    sample(1, terminalProcessResult?.ok ? terminalProcessResult : null, false, terminalDiscoveryClock);
     if (cpuAccountant && samples.at(-1).collectionStatus === "ok") samples.at(-1).cpuTerminal = true;
     const summary = summarizeResourceSamples(samples);
     if (cpuAccountant && !cpuAccountant.coverageComplete()) {
@@ -79,8 +93,15 @@ export function startResourceSampler(rootPid, options = {}) {
     return summary;
   }
 
-  function sample(attempt = 1, processResultOverride = null, lowerBoundOnly = false) {
+  function sample(attempt = 1, processResultOverride = null, lowerBoundOnly = false, discoveryClockOverride = null) {
     const processLister = options.processLister ?? listProcesses;
+    let discoveryClock = discoveryClockOverride;
+    try {
+      discoveryClock ??= cpuAccountant ? readLinuxCpuClock() : null;
+    } catch (error) {
+      recordCollectionError(error, lowerBoundOnly);
+      return;
+    }
     const processResult = processResultOverride ?? processLister(options.redactValues ?? []);
     if (!processResult.ok) {
       if (lowerBoundOnly) return;
@@ -170,9 +191,9 @@ export function startResourceSampler(rootPid, options = {}) {
     let cpuClock = null;
     if (cpuAccountant) {
       try {
-        // Process discovery is not part of the counter snapshot. Starting the
-        // clock earlier inflates uncertainty with unrelated `ps` latency.
         cpuClock = readLinuxCpuClock();
+        cpuClock.discoveryTicks = discoveryClock.ticks;
+        cpuClock.discoveryMonotonicMs = discoveryClock.monotonicMs;
         const counters = readLinuxCpuSnapshot(tracked, cpuAccountant.trackedProcessIds());
         cpuClock.finishedMs = performance.now();
         if (!lowerBoundOnly) lastCpuSampleFinishedMs = cpuClock.finishedMs;
@@ -193,10 +214,7 @@ export function startResourceSampler(rootPid, options = {}) {
           // retains its prior roles and wait-owner debt.
           return sample(attempt + 1, null, lowerBoundOnly);
         }
-        if (lowerBoundOnly) return;
-        samples.push({ timestamp: new Date().toISOString(), elapsedMs: Date.now() - startedAt,
-          rootPid, gatewayPid, collectionStatus: "error", collectionError: error.message, processes: [],
-          ...(lostCpuProcesses.length ? { cpuLostProcesses: [...lostCpuProcesses] } : {}) });
+        recordCollectionError(error, lowerBoundOnly);
         return;
       }
     }
