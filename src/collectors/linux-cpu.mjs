@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 let ticksPerSecond;
 function clockTicksPerSecond() {
   if (ticksPerSecond === undefined) {
-    const result = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 2000 });
+    const result = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 2000, killSignal: "SIGKILL" });
     ticksPerSecond = result.status === 0 ? Number(result.stdout.trim()) : NaN;
   }
   if (!Number.isSafeInteger(ticksPerSecond) || ticksPerSecond <= 0) {

@@ -4,6 +4,8 @@ All notable changes to Kova are documented in this file.
 
 ## Unreleased
 
+- Bound process census, gateway lookup, and Linux clock probes even when they ignore SIGTERM, preventing resource sampling from hanging command deadlines. Thanks @SebTardif. (#153)
+
 - Reject pending Gateway RPCs on malformed frames without crashing support processes, and allow subsequent valid requests to complete. Thanks @SebTardif. (#152)
 
 - Preserve terminal CPU discovery uncertainty and lifetime upper bounds, including wait-owner transfers, without inventing proven threshold breaches. Thanks @SebTardif. (#151)
