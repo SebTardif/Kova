@@ -4,6 +4,8 @@ All notable changes to Kova are documented in this file.
 
 ## Unreleased
 
+- Reject pending Gateway RPCs on malformed frames without crashing support processes, and allow subsequent valid requests to complete. Thanks @SebTardif. (#152)
+
 - Preserve terminal CPU discovery uncertainty and lifetime upper bounds, including wait-owner transfers, without inventing proven threshold breaches. Thanks @SebTardif. (#151)
 
 - Reap Telegram conformance shims when startup fails, including stalled health responses, and close their log descriptors. Thanks @SebTardif. (#150)

@@ -18,6 +18,7 @@ import { runCheckCommandTimeoutChecks } from "./check-command-timeout.mjs";
 import { runProcessCommandTimeoutChecks } from "./process-command-timeout.mjs";
 import { runProxyLogStreamChecks } from "./proxy-log-stream.mjs";
 import { runTelegramPlatformStartupChecks } from "./telegram-platform-startup.mjs";
+import { runGatewayRpcFrameChecks } from "./gateway-rpc-frame.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "kova-selfcheck-isolation-test-"));
 
@@ -34,6 +35,7 @@ try {
   const telegramRoot = join(root, "telegram-platform-startup");
   await mkdir(telegramRoot);
   await runTelegramPlatformStartupChecks(telegramRoot);
+  await runGatewayRpcFrameChecks();
   await verifyScopedShell(root);
   await verifyTargetSetupBuildTimeoutBudget(root);
   await verifyConcurrentInvocationHomes(root);
