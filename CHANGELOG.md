@@ -4,6 +4,8 @@ All notable changes to Kova are documented in this file.
 
 ## Unreleased
 
+- Preserve terminal CPU discovery uncertainty and lifetime upper bounds, including wait-owner transfers, without inventing proven threshold breaches. Thanks @SebTardif. (#151)
+
 - Reap Telegram conformance shims when startup fails, including stalled health responses, and close their log descriptors. Thanks @SebTardif. (#150)
 
 - Raise the gateway-performance gateway CPU cap from 310 % to 340 % and the gateway-tree CPU cap from 325 % to 360 % for OpenClaw 2026.9.7, approved by Peter. CPU peaks in this lane are noisy: strict release runs on OpenClaw main measured gateway-tree intervals of 272-300.3 % (openclaw/openclaw Actions run 36455844495) and 308.8-330.1 % (run 36459454760), and gateway intervals up to 308.8-314.1 %, a run-to-run spread of about 30 points. Cause: startup provider-catalog acquisition (openclaw/openclaw#145190); follow-up openclaw/openclaw#160501.
