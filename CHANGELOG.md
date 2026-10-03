@@ -4,6 +4,8 @@ All notable changes to Kova are documented in this file.
 
 ## Unreleased
 
+- Prepare the 80-plugin pressure state through OpenClaw's supported installer instead of the retired JSON install index, preserving canonical registry and startup checks.
+
 ## 0.2.2 - 2026-09-30
 
 **Highlights:** Bounded resource probes, resilient Gateway RPC handling, and more accurate Linux CPU evidence.
