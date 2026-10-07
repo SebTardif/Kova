@@ -4,6 +4,7 @@ All notable changes to Kova are documented in this file.
 
 ## Unreleased
 
+- Preserve direct Linux command accounting when execution policy denies the native owner with EPERM, cleaning up and caching the fallback. Thanks @SebTardif. (#167)
 - Generate fresh mock-auth configs that pass current OpenClaw admission while preserving existing model settings, legacy restrictions, explicit policies, and agent ownership.
 - Prepare the 80-plugin pressure state through OpenClaw's supported installer instead of the retired JSON install index, preserving canonical registry and startup checks.
 
